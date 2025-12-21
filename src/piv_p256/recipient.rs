@@ -1,6 +1,5 @@
 use age_core::primitives::bech32_encode_to_fmt;
 use p256::elliptic_curve::sec1::{FromEncodedPoint, ToEncodedPoint};
-use yubikey::{certificate::PublicKeyInfo, Certificate};
 
 use std::fmt;
 
@@ -32,17 +31,6 @@ impl Recipient {
             Self::from_encoded(&encoded)
         } else {
             None
-        }
-    }
-
-    pub(crate) fn from_certificate(cert: &Certificate) -> Option<Self> {
-        Self::from_spki(cert.subject_pki())
-    }
-
-    pub(crate) fn from_spki(spki: &PublicKeyInfo) -> Option<Self> {
-        match spki {
-            PublicKeyInfo::EcP256(pubkey) => Self::from_encoded(pubkey),
-            _ => None,
         }
     }
 
