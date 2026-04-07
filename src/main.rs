@@ -28,7 +28,7 @@ use error::Error;
 
 const PLUGIN_NAME: &str = "yubikey";
 const BINARY_NAME: &str = "age-plugin-yubikey";
-const IDENTITY_PREFIX: &str = "age-plugin-yubikey-";
+const IDENTITY_PREFIX: bech32::Hrp = bech32::Hrp::parse_unchecked("AGE-PLUGIN-YUBIKEY-");
 
 const USABLE_SLOTS: [RetiredSlotId; 20] = [
     RetiredSlotId::R1,
