@@ -1,8 +1,8 @@
 //! Structs for handling YubiKeys.
 
+use age_core::primitives::bech32_encode;
 use age_core::secrecy::{ExposeSecret, SecretString};
 use age_plugin::{identity, Callbacks};
-use bech32::{ToBase32, Variant};
 use dialoguer::Password;
 use log::{debug, error, warn};
 use std::convert::Infallible;
@@ -422,14 +422,9 @@ pub struct Stub {
 impl fmt::Display for Stub {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(
-            bech32::encode(
-                IDENTITY_PREFIX,
-                self.to_bytes().to_base32(),
-                Variant::Bech32,
-            )
-            .expect("HRP is valid")
-            .to_uppercase()
-            .as_str(),
+            bech32_encode(IDENTITY_PREFIX, &self.to_bytes())
+                .to_uppercase()
+                .as_str(),
         )
     }
 }
