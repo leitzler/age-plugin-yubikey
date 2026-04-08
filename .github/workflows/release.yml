@@ -24,7 +24,7 @@ jobs:
           - windows
         include:
           - name: linux
-            os: ubuntu-18.04
+            os: ubuntu-20.04
             build_deps: >
               libpcsclite-dev
             archive_name: age-plugin-yubikey.tar.gz
@@ -48,11 +48,10 @@ jobs:
             asset_suffix: x86_64-darwin.tar.gz
 
     steps:
-      - uses: actions/checkout@v3
-      - uses: actions-rs/toolchain@v1
-        with:
-          toolchain: stable
-          override: true
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        id: toolchain
+      - run: rustup override set ${{steps.toolchain.outputs.name}}
       - name: Add target
         run: rustup target add ${{ matrix.target }}
         if: matrix.target != ''
@@ -87,7 +86,7 @@ jobs:
         if: matrix.name == 'windows'
 
       - name: Upload archive to release
-        uses: svenstaro/upload-release-action@2.5.0
+        uses: svenstaro/upload-release-action@2.6.1
         with:
           file: ${{ matrix.archive_name }}
           asset_name: age-plugin-yubikey-$tag-${{ matrix.asset_suffix }}
@@ -96,7 +95,7 @@ jobs:
 
   deb:
     name: Debian ${{ matrix.name }}
-    runs-on: ubuntu-18.04
+    runs-on: ubuntu-20.04
     strategy:
       matrix:
         name: [linux]
@@ -107,11 +106,10 @@ jobs:
               libpcsclite-dev
 
     steps:
-      - uses: actions/checkout@v3
-      - uses: actions-rs/toolchain@v1
-        with:
-          toolchain: stable
-          override: true
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        id: toolchain
+      - run: rustup override set ${{steps.toolchain.outputs.name}}
       - name: Add target
         run: rustup target add ${{ matrix.target }}
       - name: cargo install cargo-deb
@@ -146,7 +144,7 @@ jobs:
           args: --package age-plugin-yubikey --no-build --target ${{ matrix.target }}
 
       - name: Upload Debian package to release
-        uses: svenstaro/upload-release-action@2.5.0
+        uses: svenstaro/upload-release-action@2.6.1
         with:
           file: target/${{ matrix.target }}/debian/*.deb
           file_glob: true

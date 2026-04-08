@@ -14,6 +14,13 @@ to 0.3.0 are beta releases.
   critical extensions in its certificate, to ensure it doesn't misuse a newer
   identity type.
 
+## [0.5.0] - 2024-08-04
+### Fixed
+- `age-plugin-yubikey` can now be compiled with Rust 1.80 and above.
+
+### Changed
+- MSRV is now 1.67.0.
+
 ## [0.4.0] - 2023-04-09
 ### Changed
 - MSRV is now 1.65.0.
