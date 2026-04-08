@@ -76,6 +76,14 @@ cli-setup-name-identity       = 📛 Name this identity
 cli-setup-select-pin-policy   = 🔤 Select a PIN policy
 cli-setup-select-touch-policy = 👆 Select a touch policy
 
+cli-setup-yk4-pin-policy =
+    ⚠️ Your {-yubikey} is a {-yubikey} 4 series. With ephemeral applications like
+    {-age-plugin-yubikey}, a PIN policy of "Once" behaves like a PIN policy of
+    "Always", and your PIN will be requested for every decryption. However, you
+    might still benefit from a PIN policy of "Once" in long-running applications
+    like agents.
+cli-setup-yk4-pin-policy-confirm = Use PIN policy of "Once" with {-yubikey} 4?
+
 cli-setup-generate-new = Generate new identity in slot {$slot_index}?
 cli-setup-use-existing = Use existing identity in slot {$slot_index}?
 
@@ -112,6 +120,7 @@ cli-setup-finished =
 open-yk-with-serial    = ⏳ Please insert the {-yubikey} with serial {$yubikey_serial}.
 open-yk-without-serial = ⏳ Please insert the {-yubikey}.
 warn-yk-not-connected  = Ignoring {$yubikey_name}: not connected
+warn-yk-missing-applet = Ignoring {$yubikey_name}: Missing {$applet_name} applet
 
 print-recipient = Recipient: {$recipient}
 
@@ -146,6 +155,12 @@ mgr-changing-mgmt-key-error =
     {"  "}{$management_key}
 mgr-changing-mgmt-key-success = Success!
 
+## YubiKey keygen
+
+builder-gen-key  = 🎲 Generating key...
+builder-gen-cert = 🔏 Generating certificate...
+builder-touch-yk = 👆 Please touch the {-yubikey}
+
 ## Plugin usage
 
 plugin-err-invalid-recipient = Invalid recipient
@@ -172,8 +187,12 @@ plugin-err-pin-required     = A PIN is required for {-yubikey} with serial {$yub
 
 ## Errors
 
+err-mgmt-key-auth = Failed to authenticate with the PIN-protected management key.
+rec-mgmt-key-auth =
+    Check whether your management key is using the TDES algorithm.
+    AES is not supported yet: {$aes_url}
 err-custom-mgmt-key = Custom unprotected non-TDES management keys are not supported.
-rec-custom-mgmt-key =
+rec-change-mgmt-key =
     You can use the {-yubikey} Manager CLI to change to a protected management key:
     {"  "}{$cmd}
 
@@ -205,15 +224,26 @@ rec-yk-no-service-pcscd =
     If you are on Debian or Ubuntu, you can install it with:
     {"  "}{$apt}
 
+rec-yk-no-service-pcscd-bsd =
+    You can install and run it as root with:
+    {"  "}{$pkg}
+    {"  "}{$service_enable}
+    {"  "}{$service_start}
+
 err-yk-no-service-win = The Smart Cards for Windows service is not running.
 rec-yk-no-service-win =
     See this troubleshooting guide for more help:
     {"  "}{$url}
 
 err-yk-not-found         = Please insert the {-yubikey} you want to set up
-err-yk-wrong-pin         = Invalid PIN ({$tries} tries remaining before it is blocked)
 err-yk-general           = Error while communicating with {-yubikey}: {$err}
 err-yk-general-cause     = Cause: {$inner_err}
+
+err-yk-wrong-pin = Invalid {$pin_kind} ({$tries ->
+    [one] {$tries} try remaining
+   *[other] {$tries} tries remaining
+} before it is blocked)
+err-yk-pin-locked = {$pin_kind} locked
 
 err-ux-A = Did this not do what you expected? Could an error be more useful?
 err-ux-B = Tell us

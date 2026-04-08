@@ -181,6 +181,13 @@ fn generate(flags: PluginFlags) -> Result<(), Error> {
 
     util::print_identity(stub, recipient, metadata);
 
+    // We have written to the YubiKey, which means we've authenticated with the management
+    // key. Out of an abundance of caution, we let the YubiKey be reset on disconnect,
+    // which will clear its PIN and touch caches. This has as small negative UX effect,
+    // but identity generation is a relatively infrequent occurrence, and users are more
+    // likely to see their cached PINs reset due to switching applets (e.g. from PIV to
+    // FIDO2).
+
     Ok(())
 }
 
@@ -199,6 +206,8 @@ fn print_single(
     let metadata = util::Metadata::extract(&mut yubikey, slot, key.certificate(), true).unwrap();
 
     printer(stub, recipient, metadata);
+
+    key::disconnect_without_reset(yubikey);
 
     Ok(())
 }
@@ -233,6 +242,8 @@ fn print_multiple(
             println!();
         }
         println!();
+
+        key::disconnect_without_reset(yubikey);
     }
     if printed > 1 {
         eprintln!("{}", fl!("printed-multiple", kind = kind, count = printed));
@@ -286,7 +297,7 @@ fn list(flags: PluginFlags, all: bool) -> Result<(), Error> {
         all,
         |_, recipient, metadata| {
             println!("{}", metadata);
-            println!("{}", recipient.to_string());
+            println!("{}", recipient);
         },
     )
 }
@@ -360,11 +371,13 @@ fn main() -> Result<(), Error> {
             .iter()
             .map(|reader| {
                 key::open_connection(reader).map(|yk| {
-                    fl!(
+                    let name = fl!(
                         "cli-setup-yk-name",
                         yubikey_name = reader.name(),
                         yubikey_serial = yk.serial().to_string(),
-                    )
+                    );
+                    key::disconnect_without_reset(yk);
+                    name
                 })
             })
             .collect::<Result<Vec<_>, _>>()?;
@@ -372,6 +385,7 @@ fn main() -> Result<(), Error> {
             .with_prompt(fl!("cli-setup-select-yk"))
             .items(&reader_names)
             .default(0)
+            .report(true)
             .interact_opt()?
         {
             Some(yk) => readers_list[yk].open()?,
@@ -393,7 +407,11 @@ fn main() -> Result<(), Error> {
                                 x509_parser::parse_x509_certificate(key.certificate().as_ref())
                                     .unwrap();
                             let (name, _) = util::extract_name(&cert, true).unwrap();
-                            let created = cert.validity().not_before.to_rfc2822();
+                            let created = cert
+                                .validity()
+                                .not_before
+                                .to_rfc2822()
+                                .unwrap_or_else(|e| format!("Invalid date: {}", e));
 
                             format!("{}, created: {}", name, created)
                         })
@@ -426,6 +444,7 @@ fn main() -> Result<(), Error> {
                     .with_prompt(fl!("cli-setup-select-slot"))
                     .items(&slots)
                     .default(0)
+                    .report(true)
                     .interact_opt()?
                 {
                     Some(slot) => {
@@ -443,6 +462,7 @@ fn main() -> Result<(), Error> {
 
                 if Confirm::new()
                     .with_prompt(fl!("cli-setup-use-existing", slot_index = slot_index))
+                    .report(true)
                     .interact()?
                 {
                     let stub = key::Stub::new(yubikey.serial(), slot, &recipient);
@@ -450,8 +470,10 @@ fn main() -> Result<(), Error> {
                         util::Metadata::extract(&mut yubikey, slot, key.certificate(), true)
                             .unwrap();
 
+                    key::disconnect_without_reset(yubikey);
                     ((stub, recipient, metadata), false)
                 } else {
+                    key::disconnect_without_reset(yubikey);
                     return Ok(());
                 }
             } else {
@@ -462,30 +484,57 @@ fn main() -> Result<(), Error> {
                         flags.name.as_deref().unwrap_or("age identity TAG_HEX")
                     ))
                     .allow_empty(true)
+                    .report(true)
                     .interact_text()?;
 
-                let pin_policy = match Select::new()
-                    .with_prompt(fl!("cli-setup-select-pin-policy"))
-                    .items(&[
-                        fl!("pin-policy-always"),
-                        fl!("pin-policy-once"),
-                        fl!("pin-policy-never"),
-                    ])
-                    .default(
-                        [PinPolicy::Always, PinPolicy::Once, PinPolicy::Never]
-                            .iter()
-                            .position(|p| {
-                                p == &flags.pin_policy.unwrap_or(builder::DEFAULT_PIN_POLICY)
-                            })
-                            .unwrap(),
-                    )
-                    .interact_opt()?
-                {
-                    Some(0) => PinPolicy::Always,
-                    Some(1) => PinPolicy::Once,
-                    Some(2) => PinPolicy::Never,
-                    Some(_) => unreachable!(),
-                    None => return Ok(()),
+                let mut displayed_yk4_warning = false;
+                let pin_policy = loop {
+                    let pin_policy = match Select::new()
+                        .with_prompt(fl!("cli-setup-select-pin-policy"))
+                        .items(&[
+                            fl!("pin-policy-always"),
+                            fl!("pin-policy-once"),
+                            fl!("pin-policy-never"),
+                        ])
+                        .default(
+                            [PinPolicy::Always, PinPolicy::Once, PinPolicy::Never]
+                                .iter()
+                                .position(|p| {
+                                    p == &flags.pin_policy.unwrap_or(builder::DEFAULT_PIN_POLICY)
+                                })
+                                .unwrap(),
+                        )
+                        .report(true)
+                        .interact_opt()?
+                    {
+                        Some(0) => PinPolicy::Always,
+                        Some(1) => PinPolicy::Once,
+                        Some(2) => PinPolicy::Never,
+                        Some(_) => unreachable!(),
+                        None => return Ok(()),
+                    };
+
+                    // We can't preserve the PIN cache for YubiKey 4 series, because to
+                    // retrieve the serial we switch to the OTP applet.
+                    match (pin_policy, yubikey.version().major) {
+                        (PinPolicy::Once, 4) => {
+                            if !displayed_yk4_warning {
+                                eprintln!();
+                                eprintln!("{}", fl!("cli-setup-yk4-pin-policy"));
+                                eprintln!();
+                                displayed_yk4_warning = true;
+                            }
+
+                            if Confirm::new()
+                                .with_prompt(fl!("cli-setup-yk4-pin-policy-confirm"))
+                                .report(true)
+                                .interact()?
+                            {
+                                break pin_policy;
+                            }
+                        }
+                        _ => break pin_policy,
+                    }
                 };
 
                 let touch_policy = match Select::new()
@@ -503,6 +552,7 @@ fn main() -> Result<(), Error> {
                             })
                             .unwrap(),
                     )
+                    .report(true)
                     .interact_opt()?
                 {
                     Some(0) => TouchPolicy::Always,
@@ -514,6 +564,7 @@ fn main() -> Result<(), Error> {
 
                 if Confirm::new()
                     .with_prompt(fl!("cli-setup-generate-new", slot_index = slot_index))
+                    .report(true)
                     .interact()?
                 {
                     eprintln!();
@@ -529,6 +580,7 @@ fn main() -> Result<(), Error> {
                         true,
                     )
                 } else {
+                    key::disconnect_without_reset(yubikey);
                     return Ok(());
                 }
             }
@@ -541,6 +593,7 @@ fn main() -> Result<(), Error> {
                 "age-yubikey-identity-{}.txt",
                 hex::encode(stub.tag)
             ))
+            .report(true)
             .interact_text()?;
 
         let mut file = match OpenOptions::new()
@@ -552,6 +605,7 @@ fn main() -> Result<(), Error> {
             Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
                 if Confirm::new()
                     .with_prompt(fl!("cli-setup-identity-file-exists"))
+                    .report(true)
                     .interact()?
                 {
                     File::create(&file_name)?

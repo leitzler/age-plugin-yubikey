@@ -1,10 +1,15 @@
 use age_core::{
     format::{FileKey, Stanza},
-    primitives::{aead_encrypt, hkdf},
+    primitives::aead_encrypt,
     secrecy::ExposeSecret,
 };
-use p256::{ecdh::EphemeralSecret, elliptic_curve::sec1::ToEncodedPoint};
+use base64::{prelude::BASE64_STANDARD_NO_PAD, Engine};
+use p256::{
+    ecdh::EphemeralSecret,
+    elliptic_curve::sec1::{FromEncodedPoint, ToEncodedPoint},
+};
 use rand::rngs::OsRng;
+use sha2::Sha256;
 
 use crate::{p256::Recipient, STANZA_TAG};
 
@@ -22,8 +27,12 @@ pub(crate) struct EphemeralKeyBytes(p256::EncodedPoint);
 
 impl EphemeralKeyBytes {
     fn from_bytes(bytes: [u8; EPK_BYTES]) -> Option<Self> {
-        let encoded = p256::EncodedPoint::from_bytes(&bytes).ok()?;
-        if encoded.is_compressed() && encoded.decompress().is_some() {
+        let encoded = p256::EncodedPoint::from_bytes(bytes).ok()?;
+        if encoded.is_compressed()
+            && p256::PublicKey::from_encoded_point(&encoded)
+                .is_some()
+                .into()
+        {
             Some(EphemeralKeyBytes(encoded))
         } else {
             None
@@ -39,9 +48,9 @@ impl EphemeralKeyBytes {
     }
 
     pub(crate) fn decompress(&self) -> p256::EncodedPoint {
-        self.0
-            .decompress()
-            .expect("EphemeralKeyBytes is a valid compressed encoding by construction")
+        // EphemeralKeyBytes is a valid compressed encoding by construction.
+        let p = p256::PublicKey::from_encoded_point(&self.0).unwrap();
+        p.to_encoded_point(false)
     }
 }
 
@@ -57,8 +66,8 @@ impl From<RecipientLine> for Stanza {
         Stanza {
             tag: STANZA_TAG.to_owned(),
             args: vec![
-                base64::encode_config(&r.tag, base64::STANDARD_NO_PAD),
-                base64::encode_config(r.epk_bytes.as_bytes(), base64::STANDARD_NO_PAD),
+                BASE64_STANDARD_NO_PAD.encode(r.tag),
+                BASE64_STANDARD_NO_PAD.encode(r.epk_bytes.as_bytes()),
             ],
             body: r.encrypted_file_key.to_vec(),
         }
@@ -76,9 +85,10 @@ impl RecipientLine {
                 return None;
             }
 
-            base64::decode_config_slice(arg, base64::STANDARD_NO_PAD, buf.as_mut())
+            BASE64_STANDARD_NO_PAD
+                .decode_slice_unchecked(arg, buf.as_mut())
                 .ok()
-                .map(|_| buf)
+                .and_then(|len| (len == buf.as_mut().len()).then_some(buf))
         }
 
         let (tag, epk_bytes) = match &s.args[..] {
@@ -101,7 +111,7 @@ impl RecipientLine {
     }
 
     pub(crate) fn wrap_file_key(file_key: &FileKey, pk: &Recipient) -> Self {
-        let esk = EphemeralSecret::random(OsRng);
+        let esk = EphemeralSecret::random(&mut OsRng);
         let epk = esk.public_key();
         let epk_bytes = EphemeralKeyBytes::from_public_key(&epk);
 
@@ -111,7 +121,14 @@ impl RecipientLine {
         salt.extend_from_slice(epk_bytes.as_bytes());
         salt.extend_from_slice(pk.to_encoded().as_bytes());
 
-        let enc_key = hkdf(&salt, STANZA_KEY_LABEL, shared_secret.as_bytes());
+        let enc_key = {
+            let mut okm = [0; 32];
+            shared_secret
+                .extract::<Sha256>(Some(&salt))
+                .expand(STANZA_KEY_LABEL, &mut okm)
+                .expect("okm is the correct length");
+            okm
+        };
 
         let encrypted_file_key = {
             let mut key = [0; ENCRYPTED_FILE_KEY_BYTES];

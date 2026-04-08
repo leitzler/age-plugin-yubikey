@@ -53,7 +53,24 @@ pub(crate) fn filter_connected(reader: &Reader) -> bool {
             );
             false
         }
-        _ => true,
+        Err(yubikey::Error::AppletNotFound { applet_name }) => {
+            warn!(
+                "{}",
+                fl!(
+                    "warn-yk-missing-applet",
+                    yubikey_name = reader.name(),
+                    applet_name = applet_name,
+                ),
+            );
+            false
+        }
+        Err(_) => true,
+        Ok(yubikey) => {
+            // We only connected as a side-effect of confirming that we can connect, so
+            // avoid resetting the YubiKey.
+            disconnect_without_reset(yubikey);
+            true
+        }
     }
 }
 
@@ -185,6 +202,9 @@ fn open_by_serial(serial: Serial) -> Result<YubiKey, yubikey::Error> {
 
             if serial == yubikey.serial() {
                 return Ok(yubikey);
+            } else {
+                // We didn't want this YubiKey; don't reset it.
+                disconnect_without_reset(yubikey);
             }
         }
 
@@ -241,6 +261,23 @@ pub(crate) fn open(serial: Option<Serial>) -> Result<YubiKey, Error> {
     Ok(yubikey)
 }
 
+/// Disconnect from the YubiKey without resetting it.
+///
+/// This can be used to preserve the YubiKey's PIN and touch caches. There are two cases
+/// where we want to do this:
+///
+/// - We connected to this YubiKey in a read-only context, so we have not made any changes
+///   to the YubiKey's state. However, we might have asked an agent to release the YubiKey
+///   in `key::open_connection`, and we want to allow any state it may have left behind
+///   (such as cached PINs or touches) to persist beyond our execution, for usability.
+/// - We opened this connection in a decryption context, so the only changes to the
+///   YubiKey's state were to potentially cache the PIN and/or touch (depending on the
+///   policies of the slot). We want to allow these to persist beyond our execution, for
+///   usability.
+pub(crate) fn disconnect_without_reset(yubikey: YubiKey) {
+    let _ = yubikey.disconnect(pcsc::Disposition::LeaveCard);
+}
+
 fn request_pin<E>(
     mut prompt: impl FnMut(Option<String>) -> io::Result<Result<SecretString, E>>,
     serial: Serial,
@@ -277,6 +314,7 @@ pub(crate) fn manage(yubikey: &mut YubiKey) -> Result<(), Error> {
             yubikey_serial = yubikey.serial().to_string(),
             default_pin = DEFAULT_PIN,
         ))
+        .report(true)
         .interact()?;
     yubikey.verify_pin(pin.as_bytes())?;
 
@@ -310,34 +348,45 @@ pub(crate) fn manage(yubikey: &mut YubiKey) -> Result<(), Error> {
             }
         };
         let new_pin = new_pin.expose_secret();
-        yubikey.change_puk(current_puk.as_bytes(), new_pin.as_bytes())?;
+        yubikey
+            .change_puk(current_puk.as_bytes(), new_pin.as_bytes())
+            .map_err(|e| match e {
+                yubikey::Error::PinLocked => Error::PukLocked,
+                yubikey::Error::WrongPin { tries } => Error::WrongPuk(tries),
+                _ => Error::YubiKey(e),
+            })?;
         yubikey.change_pin(pin.as_bytes(), new_pin.as_bytes())?;
     }
 
-    if let Ok(mgm_key) = MgmKey::get_protected(yubikey) {
-        yubikey.authenticate(mgm_key)?;
-    } else {
-        // Try to authenticate with the default management key.
-        yubikey
-            .authenticate(MgmKey::default())
-            .map_err(|_| Error::CustomManagementKey)?;
+    match MgmKey::get_protected(yubikey) {
+        Ok(mgm_key) => yubikey.authenticate(mgm_key).map_err(|e| match e {
+            yubikey::Error::AuthenticationError => Error::ManagementKeyAuth,
+            _ => e.into(),
+        })?,
+        Err(yubikey::Error::AuthenticationError) => Err(Error::ManagementKeyAuth)?,
+        _ => {
+            // Try to authenticate with the default management key.
+            yubikey
+                .authenticate(MgmKey::default())
+                .map_err(|_| Error::CustomManagementKey)?;
 
-        // Migrate to a PIN-protected management key.
-        let mgm_key = MgmKey::generate();
-        eprintln!();
-        eprintln!("{}", fl!("mgr-changing-mgmt-key"));
-        eprint!("... ");
-        mgm_key.set_protected(yubikey).map_err(|e| {
-            eprintln!(
-                "{}",
-                fl!(
-                    "mgr-changing-mgmt-key-error",
-                    management_key = hex::encode(mgm_key.as_ref()),
-                )
-            );
-            e
-        })?;
-        eprintln!("{}", fl!("mgr-changing-mgmt-key-success"));
+            // Migrate to a PIN-protected management key.
+            let mgm_key = MgmKey::generate();
+            eprintln!();
+            eprintln!("{}", fl!("mgr-changing-mgmt-key"));
+            eprint!("... ");
+            mgm_key.set_protected(yubikey).map_err(|e| {
+                eprintln!(
+                    "{}",
+                    fl!(
+                        "mgr-changing-mgmt-key-error",
+                        management_key = hex::encode(mgm_key.as_ref()),
+                    )
+                );
+                e
+            })?;
+            eprintln!("{}", fl!("mgr-changing-mgmt-key-success"));
+        }
     }
 
     Ok(())
@@ -642,13 +691,13 @@ impl Connection {
                     metadata => metadata,
                 };
         }
-        if let Some(PinPolicy::Never) = self.cached_metadata.as_ref().and_then(|m| m.pin_policy) {
-            return Ok(Ok(()));
+        match self.cached_metadata.as_ref().and_then(|m| m.pin_policy) {
+            Some(PinPolicy::Never) => return Ok(Ok(())),
+            Some(PinPolicy::Once) if self.yubikey.verify_pin(&[]).is_ok() => return Ok(Ok(())),
+            _ => (),
         }
 
         // The policy requires a PIN, so request it.
-        // Note that we can't distinguish between PinPolicy::Once and PinPolicy::Always
-        // because this plugin is ephemeral, so we always request the PIN.
         let pin = match request_pin(
             |prev_error| {
                 callbacks.request_secret(&format!(
@@ -731,6 +780,13 @@ impl Connection {
                 .into()),
             Err(_) => Err(()),
         }
+    }
+
+    /// Close this connection without resetting the YubiKey.
+    ///
+    /// This can be used to preserve the YubiKey's PIN and touch caches.
+    pub(crate) fn disconnect_without_reset(self) {
+        disconnect_without_reset(self.yubikey);
     }
 }
 

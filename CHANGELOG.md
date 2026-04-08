@@ -14,6 +14,24 @@ to 0.3.0 are beta releases.
   critical extensions in its certificate, to ensure it doesn't misuse a newer
   identity type.
 
+## [0.4.0] - 2023-04-09
+### Changed
+- MSRV is now 1.65.0.
+- The YubiKey PIV PIN and touch caches are now preserved across processes in
+  most cases. See [README.md](README.md#agent-support) for exceptions. This has
+  several usability effects (not applicable to YubiKey 4 series):
+  - If a YubiKey's PIN is cached by an agent like `yubikey-agent`, and then
+    `age-plugin-yubikey` is run (either directly or as a plugin), the agent
+    won't request a PIN entry on its next use.
+  - If a YubiKey's PIN was requested by either a previous invocation of
+    `age-plugin-yubikey` or an agent like `yubikey-agent`, subsequent calls to
+    `age-plugin-yubikey` won't request a PIN entry to decrypt a file with an
+    identity that has a PIN policy of `once`.
+
+### Fixed
+- Identities can now be generated with a PIN policy of "always" (in previous
+  versions of `age-plugin-yubikey` this would cause an error).
+
 ## [0.3.3] - 2023-02-11
 ### Fixed
 - When `age-plugin-yubikey` assists the user in changing their PIN from the

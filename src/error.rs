@@ -21,14 +21,17 @@ pub enum Error {
     InvalidSlot(u8),
     InvalidTouchPolicy(String),
     Io(io::Error),
+    ManagementKeyAuth,
     MultipleCommands,
     MultipleYubiKeys,
     NoEmptySlots(Serial),
     NoMatchingSerial(Serial),
+    PukLocked,
     SlotHasNoIdentity(RetiredSlotId),
     SlotIsNotEmpty(RetiredSlotId),
     TimedOut,
     UseListForSingleSlot,
+    WrongPuk(u8),
     YubiKey(yubikey::Error),
 }
 
@@ -48,12 +51,19 @@ impl From<yubikey::Error> for Error {
 // manually to provide the error output we want.
 impl fmt::Debug for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        const CHANGE_MGMT_KEY_CMD: &str =
+            "ykman piv access change-management-key -a TDES --protect";
+        const CHANGE_MGMT_KEY_URL: &str = "https://developers.yubico.com/yubikey-manager/";
+
         match self {
             Error::CustomManagementKey => {
                 wlnfl!(f, "err-custom-mgmt-key")?;
-                let cmd = "ykman piv access change-management-key --protect";
-                let url = "https://developers.yubico.com/yubikey-manager/";
-                wlnfl!(f, "rec-custom-mgmt-key", cmd = cmd, url = url)?;
+                wlnfl!(
+                    f,
+                    "rec-change-mgmt-key",
+                    cmd = CHANGE_MGMT_KEY_CMD,
+                    url = CHANGE_MGMT_KEY_URL
+                )?;
             }
             Error::InvalidFlagCommand(flag, command) => wlnfl!(
                 f,
@@ -76,6 +86,17 @@ impl fmt::Debug for Error {
                 expected = "always, cached, never",
             )?,
             Error::Io(e) => wlnfl!(f, "err-io", err = e.to_string())?,
+            Error::ManagementKeyAuth => {
+                let aes_url = "https://github.com/str4d/age-plugin-yubikey/issues/92";
+                wlnfl!(f, "err-mgmt-key-auth")?;
+                wlnfl!(f, "rec-mgmt-key-auth", aes_url = aes_url)?;
+                wlnfl!(
+                    f,
+                    "rec-change-mgmt-key",
+                    cmd = CHANGE_MGMT_KEY_CMD,
+                    url = CHANGE_MGMT_KEY_URL
+                )?;
+            }
             Error::MultipleCommands => wlnfl!(f, "err-multiple-commands")?,
             Error::MultipleYubiKeys => wlnfl!(f, "err-multiple-yubikeys")?,
             Error::NoEmptySlots(serial) => {
@@ -84,6 +105,7 @@ impl fmt::Debug for Error {
             Error::NoMatchingSerial(serial) => {
                 wlnfl!(f, "err-no-matching-serial", serial = serial.to_string())?
             }
+            Error::PukLocked => wlnfl!(f, "err-yk-pin-locked", pin_kind = "PUK")?,
             Error::SlotHasNoIdentity(slot) => {
                 wlnfl!(f, "err-slot-has-no-identity", slot = slot_to_ui(slot))?
             }
@@ -92,6 +114,9 @@ impl fmt::Debug for Error {
             }
             Error::TimedOut => wlnfl!(f, "err-timed-out")?,
             Error::UseListForSingleSlot => wlnfl!(f, "err-use-list-for-single")?,
+            Error::WrongPuk(tries) => {
+                wlnfl!(f, "err-yk-wrong-pin", pin_kind = "PUK", tries = tries)?
+            }
             Error::YubiKey(e) => match e {
                 yubikey::Error::NotFound => wlnfl!(f, "err-yk-not-found")?,
                 yubikey::Error::PcscError {
@@ -105,13 +130,40 @@ impl fmt::Debug for Error {
                         wlnfl!(f, "err-yk-no-service-macos")?;
                         let url = "https://apple.stackexchange.com/a/438198";
                         wlnfl!(f, "rec-yk-no-service-macos", url = url)?;
+                    } else if cfg!(target_os = "openbsd") {
+                        wlnfl!(f, "err-yk-no-service-pcscd")?;
+                        let pkg = "pkg_add pcsc-lite ccid";
+                        let service_enable = "rcctl enable pcscd";
+                        let service_start = "rcctl start pcscd";
+                        wlnfl!(
+                            f,
+                            "rec-yk-no-service-pcscd-bsd",
+                            pkg = pkg,
+                            service_enable = service_enable,
+                            service_start = service_start
+                        )?;
+                    } else if cfg!(target_os = "freebsd") {
+                        wlnfl!(f, "err-yk-no-service-pcscd")?;
+                        let pkg = "pkg install pcsc-lite libccid";
+                        let service_enable = "service pcscd enable";
+                        let service_start = "service pcscd start";
+                        wlnfl!(
+                            f,
+                            "rec-yk-no-service-pcscd-bsd",
+                            pkg = pkg,
+                            service_enable = service_enable,
+                            service_start = service_start
+                        )?;
                     } else {
                         wlnfl!(f, "err-yk-no-service-pcscd")?;
                         let apt = "sudo apt-get install pcscd";
                         wlnfl!(f, "rec-yk-no-service-pcscd", apt = apt)?;
                     }
                 }
-                yubikey::Error::WrongPin { tries } => wlnfl!(f, "err-yk-wrong-pin", tries = tries)?,
+                yubikey::Error::PinLocked => wlnfl!(f, "err-yk-pin-locked", pin_kind = "PIN")?,
+                yubikey::Error::WrongPin { tries } => {
+                    wlnfl!(f, "err-yk-wrong-pin", pin_kind = "PIN", tries = tries)?
+                }
                 e => {
                     wlnfl!(f, "err-yk-general", err = e.to_string())?;
                     use std::error::Error;
