@@ -8,6 +8,12 @@ to 0.3.0 are beta releases.
 
 ## [Unreleased]
 
+## [0.3.4] - PLANNED
+### Fixed
+- `age-plugin-yubikey` now completely ignores any identity that has unrecognised
+  critical extensions in its certificate, to ensure it doesn't misuse a newer
+  identity type.
+
 ## [0.3.3] - 2023-02-11
 ### Fixed
 - When `age-plugin-yubikey` assists the user in changing their PIN from the
