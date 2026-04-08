@@ -8,7 +8,7 @@ to 0.3.0 are beta releases.
 
 ## [Unreleased]
 
-## [0.3.4] - PLANNED
+## [0.3.4] - 2026-04-08
 ### Fixed
 - `age-plugin-yubikey` now completely ignores any identity that has unrecognised
   critical extensions in its certificate, to ensure it doesn't misuse a newer
