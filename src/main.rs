@@ -16,19 +16,20 @@ use yubikey::{piv::RetiredSlotId, reader::Context, PinPolicy, Serial, TouchPolic
 
 mod builder;
 mod error;
-mod format;
 mod key;
-mod p256;
+mod native;
+mod piv_p256;
 mod plugin;
 mod util;
+
+mod recipient;
+use recipient::Recipient;
 
 use error::Error;
 
 const PLUGIN_NAME: &str = "yubikey";
 const BINARY_NAME: &str = "age-plugin-yubikey";
-const RECIPIENT_PREFIX: &str = "age1yubikey";
-const IDENTITY_PREFIX: &str = "age-plugin-yubikey-";
-const STANZA_TAG: &str = "piv-p256";
+const IDENTITY_PREFIX: bech32::Hrp = bech32::Hrp::parse_unchecked("AGE-PLUGIN-YUBIKEY-");
 
 const USABLE_SLOTS: [RetiredSlotId; 20] = [
     RetiredSlotId::R1,
@@ -194,7 +195,7 @@ fn generate(flags: PluginFlags) -> Result<(), Error> {
 fn print_single(
     serial: Option<Serial>,
     slot: RetiredSlotId,
-    printer: impl Fn(key::Stub, p256::Recipient, util::Metadata),
+    printer: impl Fn(key::Stub, Recipient, util::Metadata),
 ) -> Result<(), Error> {
     let mut yubikey = key::open(serial)?;
 
@@ -216,7 +217,7 @@ fn print_multiple(
     kind: &str,
     serial: Option<Serial>,
     all: bool,
-    printer: impl Fn(key::Stub, p256::Recipient, util::Metadata),
+    printer: impl Fn(key::Stub, Recipient, util::Metadata),
 ) -> Result<(), Error> {
     let mut readers = Context::open()?;
 
@@ -256,7 +257,7 @@ fn print_details(
     kind: &str,
     flags: PluginFlags,
     all: bool,
-    printer: impl Fn(key::Stub, p256::Recipient, util::Metadata),
+    printer: impl Fn(key::Stub, Recipient, util::Metadata),
 ) -> Result<(), Error> {
     if let Some(slot) = flags.slot {
         print_single(flags.serial, slot, printer)
@@ -297,6 +298,12 @@ fn list(flags: PluginFlags, all: bool) -> Result<(), Error> {
         all,
         |_, recipient, metadata| {
             println!("{metadata}");
+            if let Some(legacy_recipient) = recipient.legacy_recipient(&metadata) {
+                println!(
+                    "{}",
+                    fl!("yubikey-legacy-recipient", recipient = legacy_recipient)
+                );
+            }
             println!("{recipient}");
         },
     )
@@ -327,11 +334,7 @@ fn main() -> Result<(), Error> {
     }
 
     if let Some(state_machine) = opts.age_plugin {
-        run_state_machine(
-            &state_machine,
-            Some(plugin::RecipientPlugin::default),
-            Some(plugin::IdentityPlugin::default),
-        )?;
+        run_state_machine(&state_machine, plugin::Handler)?;
         Ok(())
     } else if opts.version {
         println!("age-plugin-yubikey {}", env!("CARGO_PKG_VERSION"));
@@ -406,7 +409,7 @@ fn main() -> Result<(), Error> {
                             let (_, cert) =
                                 x509_parser::parse_x509_certificate(key.certificate().as_ref())
                                     .unwrap();
-                            let (name, _) = util::extract_name(&cert, true).unwrap();
+                            let (name, _) = util::extract_name_and_version(&cert, true).unwrap();
                             let created = cert
                                 .validity()
                                 .not_before
@@ -616,6 +619,15 @@ fn main() -> Result<(), Error> {
             Err(e) => return Err(e.into()),
         };
 
+        let identity = if let Some(legacy_recipient) = recipient.legacy_recipient(&metadata) {
+            format!(
+                "{}\n{stub}",
+                fl!("yubikey-legacy-recipient", recipient = legacy_recipient),
+            )
+        } else {
+            stub.to_string()
+        };
+
         writeln!(
             file,
             "{}",
@@ -623,7 +635,7 @@ fn main() -> Result<(), Error> {
                 "yubikey-identity",
                 yubikey_metadata = metadata.to_string(),
                 recipient = recipient.to_string(),
-                identity = stub.to_string(),
+                identity = identity,
             )
         )?;
         file.sync_data()?;

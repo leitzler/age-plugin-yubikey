@@ -1,12 +1,8 @@
 //! Structs for handling YubiKeys.
 
-use age_core::{
-    format::{FileKey, FILE_KEY_BYTES},
-    primitives::{aead_decrypt, hkdf},
-    secrecy::{ExposeSecret, SecretString},
-};
+use age_core::primitives::bech32_encode;
+use age_core::secrecy::{ExposeSecret, SecretString};
 use age_plugin::{identity, Callbacks};
-use bech32::{ToBase32, Variant};
 use dialoguer::Password;
 use log::{debug, error, warn};
 use std::convert::Infallible;
@@ -26,10 +22,10 @@ use yubikey::{
 use crate::{
     error::Error,
     fl,
-    format::{RecipientLine, STANZA_KEY_LABEL},
-    p256::{Recipient, TAG_BYTES},
+    native::p256tag,
+    recipient::TAG_BYTES,
     util::{otp_serial_prefix, Metadata, POLICY_EXTENSION_OID},
-    IDENTITY_PREFIX,
+    Recipient, IDENTITY_PREFIX,
 };
 
 const ONE_SECOND: Duration = Duration::from_secs(1);
@@ -336,7 +332,7 @@ pub(crate) fn manage(yubikey: &mut YubiKey) -> Result<(), Error> {
                         .with_prompt(fl!("mgr-choose-new-pin"))
                         .with_confirmation(fl!("mgr-repeat-new-pin"), fl!("mgr-pin-mismatch"))
                         .interact()
-                        .map(|pin| Result::<_, Infallible>::Ok(SecretString::new(pin)))
+                        .map(|pin| Result::<_, Infallible>::Ok(SecretString::from(pin)))
                 },
                 yubikey.serial(),
             )?
@@ -413,7 +409,7 @@ pub(crate) fn identify_recipient(cert: &Certificate) -> Option<Recipient> {
         return None;
     }
 
-    Recipient::from_certificate(cert)
+    p256tag::Recipient::from_certificate(cert).map(Recipient::P256Tag)
 }
 
 /// Returns an iterator of keys that are occupying plugin-compatible slots, along with the
@@ -453,14 +449,9 @@ pub struct Stub {
 impl fmt::Display for Stub {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(
-            bech32::encode(
-                IDENTITY_PREFIX,
-                self.to_bytes().to_base32(),
-                Variant::Bech32,
-            )
-            .expect("HRP is valid")
-            .to_uppercase()
-            .as_str(),
+            bech32_encode(IDENTITY_PREFIX, &self.to_bytes())
+                .to_uppercase()
+                .as_str(),
         )
     }
 }
@@ -480,7 +471,7 @@ impl Stub {
         Stub {
             serial,
             slot,
-            tag: recipient.tag(),
+            tag: recipient.static_tag(),
             identity_index: 0,
         }
     }
@@ -505,10 +496,6 @@ impl Stub {
         bytes.push(self.slot.into());
         bytes.extend_from_slice(&self.tag);
         bytes
-    }
-
-    pub(crate) fn matches(&self, line: &RecipientLine) -> bool {
-        self.tag == line.tag
     }
 
     /// Returns:
@@ -632,8 +619,9 @@ impl Stub {
         let (cert, pk) = match Certificate::read(&mut yubikey, SlotId::Retired(self.slot))
             .ok()
             .and_then(|cert| {
+                // Parse as the preferred recipient for each identity type.
                 identify_recipient(&cert)
-                    .filter(|recipient| recipient.tag() == self.tag)
+                    .filter(|recipient| recipient.static_tag() == self.tag)
                     .map(|r| (cert, r))
             }) {
             Some(pk) => pk,
@@ -650,7 +638,6 @@ impl Stub {
             cert,
             pk,
             slot: self.slot,
-            tag: self.tag,
             identity_index: self.identity_index,
             cached_metadata: None,
             last_touch: None,
@@ -663,15 +650,19 @@ pub(crate) struct Connection {
     cert: Certificate,
     pk: Recipient,
     slot: RetiredSlotId,
-    tag: [u8; 4],
     identity_index: usize,
     cached_metadata: Option<Metadata>,
     last_touch: Option<Instant>,
 }
 
 impl Connection {
+    /// Returns the preferred recipient for encrypting to this identity.
     pub(crate) fn recipient(&self) -> &Recipient {
         &self.pk
+    }
+
+    pub(crate) fn stub(&self) -> Stub {
+        Stub::new(self.yubikey.serial(), self.slot, &self.pk)
     }
 
     pub(crate) fn request_pin_if_necessary<E>(
@@ -732,8 +723,10 @@ impl Connection {
         Ok(Ok(()))
     }
 
-    pub(crate) fn unwrap_file_key(&mut self, line: &RecipientLine) -> Result<FileKey, ()> {
-        assert_eq!(self.tag, line.tag);
+    pub(crate) fn p256_ecdh(&mut self, epk_bytes: &[u8]) -> Result<yubikey::Buffer, ()> {
+        // The YubiKey API for performing scalar multiplication takes the point in its
+        // uncompressed SEC-1 encoding.
+        assert_eq!(epk_bytes.len(), 65);
 
         // Check if the touch policy requires a touch.
         let needs_touch = match (
@@ -745,11 +738,9 @@ impl Connection {
             _ => false,
         };
 
-        // The YubiKey API for performing scalar multiplication takes the point in its
-        // uncompressed SEC-1 encoding.
         let shared_secret = match decrypt_data(
             &mut self.yubikey,
-            line.epk_bytes.decompress().as_bytes(),
+            epk_bytes,
             AlgorithmId::EccP256,
             SlotId::Retired(self.slot),
         ) {
@@ -766,20 +757,7 @@ impl Connection {
             }
         }
 
-        let mut salt = vec![];
-        salt.extend_from_slice(line.epk_bytes.as_bytes());
-        salt.extend_from_slice(self.pk.to_encoded().as_bytes());
-
-        let enc_key = hkdf(&salt, STANZA_KEY_LABEL, shared_secret.as_ref());
-
-        // A failure to decrypt is fatal, because we assume that we won't
-        // encounter 32-bit collisions on the key tag embedded in the header.
-        match aead_decrypt(&enc_key, FILE_KEY_BYTES, &line.encrypted_file_key) {
-            Ok(pt) => Ok(TryInto::<[u8; FILE_KEY_BYTES]>::try_into(&pt[..])
-                .unwrap()
-                .into()),
-            Err(_) => Err(()),
-        }
+        Ok(shared_secret)
     }
 
     /// Close this connection without resetting the YubiKey.

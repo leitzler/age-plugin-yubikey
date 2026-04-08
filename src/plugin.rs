@@ -2,12 +2,27 @@ use age_core::format::{FileKey, Stanza};
 use age_plugin::{
     identity::{self, IdentityPluginV1},
     recipient::{self, RecipientPluginV1},
-    Callbacks,
+    Callbacks, PluginHandler,
 };
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io;
 
-use crate::{fl, format, key, p256::Recipient, PLUGIN_NAME};
+use crate::{fl, key, native::p256tag, piv_p256, Recipient, PLUGIN_NAME};
+
+pub(crate) struct Handler;
+
+impl PluginHandler for Handler {
+    type RecipientV1 = RecipientPlugin;
+    type IdentityV1 = IdentityPlugin;
+
+    fn recipient_v1(self) -> io::Result<Self::RecipientV1> {
+        Ok(RecipientPlugin::default())
+    }
+
+    fn identity_v1(self) -> io::Result<Self::IdentityV1> {
+        Ok(IdentityPlugin::default())
+    }
+}
 
 #[derive(Debug, Default)]
 pub(crate) struct RecipientPlugin {
@@ -22,11 +37,7 @@ impl RecipientPluginV1 for RecipientPlugin {
         plugin_name: &str,
         bytes: &[u8],
     ) -> Result<(), recipient::Error> {
-        if let Some(pk) = if plugin_name == PLUGIN_NAME {
-            Recipient::from_bytes(bytes)
-        } else {
-            None
-        } {
+        if let Some(pk) = Recipient::from_bytes(plugin_name, bytes) {
             self.recipients.push(pk);
             Ok(())
         } else {
@@ -56,6 +67,10 @@ impl RecipientPluginV1 for RecipientPlugin {
                 message: fl!("plugin-err-invalid-identity"),
             })
         }
+    }
+
+    fn labels(&mut self) -> HashSet<String> {
+        HashSet::new()
     }
 
     fn wrap_file_keys(
@@ -95,7 +110,7 @@ impl RecipientPluginV1 for RecipientPlugin {
                     self.recipients
                         .iter()
                         .chain(yk_recipients.iter())
-                        .map(|pk| format::RecipientLine::wrap_file_key(&file_key, pk).into())
+                        .map(|pk| pk.wrap_file_key(&file_key))
                         .collect()
                 })
                 .collect())
@@ -140,16 +155,16 @@ impl IdentityPluginV1 for IdentityPlugin {
         let mut file_keys = HashMap::with_capacity(files.len());
 
         // Filter to files / stanzas for which we have matching YubiKeys
-        let mut candidate_stanzas: Vec<(&key::Stub, HashMap<usize, Vec<format::RecipientLine>>)> =
-            self.yubikeys
-                .iter()
-                .map(|stub| (stub, HashMap::new()))
-                .collect();
+        let mut candidate_stanzas: Vec<(&key::Stub, HashMap<usize, Vec<SupportedStanza>>)> = self
+            .yubikeys
+            .iter()
+            .map(|stub| (stub, HashMap::new()))
+            .collect();
 
-        for (file, stanzas) in files.iter().enumerate() {
-            for (stanza_index, stanza) in stanzas.iter().enumerate() {
+        for (file, stanzas) in files.into_iter().enumerate() {
+            for (stanza_index, stanza) in stanzas.into_iter().enumerate() {
                 match (
-                    format::RecipientLine::from_stanza(stanza).map(|res| {
+                    SupportedStanza::parse(stanza).map(|res| {
                         res.map_err(|_| identity::Error::Stanza {
                             file_index: file,
                             stanza_index,
@@ -163,7 +178,7 @@ impl IdentityPluginV1 for IdentityPlugin {
                         // A line will match at most one YubiKey.
                         if let Some(files) =
                             candidate_stanzas.iter_mut().find_map(|(stub, files)| {
-                                if stub.matches(&line) {
+                                if line.matches_stub(stub) {
                                     Some(files)
                                 } else {
                                     None
@@ -233,7 +248,7 @@ impl IdentityPluginV1 for IdentityPlugin {
                 }
 
                 for (stanza_index, line) in stanzas.iter().enumerate() {
-                    match conn.unwrap_file_key(line) {
+                    match line.unwrap_file_key(&mut conn) {
                         Ok(file_key) => {
                             // We've managed to decrypt this file!
                             file_keys.entry(file_index).or_insert(Ok(file_key));
@@ -253,5 +268,34 @@ impl IdentityPluginV1 for IdentityPlugin {
             conn.disconnect_without_reset();
         }
         Ok(file_keys)
+    }
+}
+
+enum SupportedStanza {
+    PivP256(piv_p256::RecipientLine),
+    P256Tag(p256tag::RecipientLine),
+}
+
+impl SupportedStanza {
+    fn parse(stanza: Stanza) -> Option<Result<Self, ()>> {
+        piv_p256::RecipientLine::from_stanza(&stanza)
+            .map(|res| res.map(Self::PivP256))
+            .or_else(|| {
+                p256tag::RecipientLine::from_stanza(stanza).map(|res| res.map(Self::P256Tag))
+            })
+    }
+
+    pub(crate) fn matches_stub(&self, stub: &key::Stub) -> bool {
+        match self {
+            SupportedStanza::PivP256(line) => stub.tag == line.tag,
+            SupportedStanza::P256Tag(line) => line.matches_stub(stub),
+        }
+    }
+
+    pub(crate) fn unwrap_file_key(&self, conn: &mut key::Connection) -> Result<FileKey, ()> {
+        match self {
+            SupportedStanza::PivP256(line) => line.unwrap_file_key(conn),
+            SupportedStanza::P256Tag(line) => line.unwrap_file_key(conn),
+        }
     }
 }

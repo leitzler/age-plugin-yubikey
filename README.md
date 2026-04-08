@@ -8,7 +8,7 @@ which enables files to be encrypted to age identities stored on YubiKeys.
 
 | Environment | CLI command |
 |-------------|-------------|
-| Cargo (Rust 1.67+) | `cargo install age-plugin-yubikey` |
+| Cargo (Rust 1.70+) | `cargo install age-plugin-yubikey` |
 | Homebrew (macOS or Linux) | `brew install age-plugin-yubikey` |
 | Arch Linux | `pacman -S age-plugin-yubikey` |
 | Debian | [Debian package](https://github.com/str4d/age-plugin-yubikey/releases) |
@@ -108,15 +108,17 @@ standard output:
 $ age-plugin-yubikey --list
 ```
 
-To encrypt files to these YubiKey recipients, ensure that `age-plugin-yubikey`
-is accessible in your `PATH`, and then use the recipients with an age client as
-normal (e.g. `rage -r age1yubikey1...`).
+To encrypt files to these YubiKey recipients, ensure you have a recent version
+of an age client, and then use the recipients with it as normal (e.g.
+`rage -r age1tag1...`). If this does not work, make `age-plugin-yubikey`
+accessible in your `PATH` with the name `age-plugin-tag` and try again.
 
 The output of the `--list` command can also be used directly to encrypt files to
 all recipients (e.g. `age -R filename.txt`).
 
-To decrypt files encrypted to a YubiKey identity, pass the identity file to the
-age client as normal (e.g. `rage -d -i yubikey-identity.txt`).
+To decrypt files encrypted to a YubiKey identity, ensure that
+`age-plugin-yubikey` is accessible in your `PATH`, and then pass the identity
+file to the age client as normal (e.g. `rage -d -i yubikey-identity.txt`).
 
 ## Advanced topics
 

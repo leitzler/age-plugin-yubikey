@@ -11,9 +11,9 @@ use crate::{
     error::Error,
     fl,
     key::{self, Stub},
-    p256::Recipient,
+    native::p256tag,
     util::{Metadata, POLICY_EXTENSION_OID},
-    BINARY_NAME, USABLE_SLOTS,
+    Recipient, BINARY_NAME, USABLE_SLOTS,
 };
 
 pub(crate) const DEFAULT_PIN_POLICY: PinPolicy = PinPolicy::Once;
@@ -104,7 +104,9 @@ impl IdentityBuilder {
             touch_policy,
         )?;
 
-        let recipient = Recipient::from_spki(&generated).expect("YubiKey generates a valid pubkey");
+        let recipient = Recipient::P256Tag(
+            p256tag::Recipient::from_spki(&generated).expect("YubiKey generates a valid pubkey"),
+        );
         let stub = Stub::new(yubikey.serial(), slot, &recipient);
 
         eprintln!();
