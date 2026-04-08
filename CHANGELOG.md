@@ -23,6 +23,12 @@ to 0.3.0 are beta releases.
   shown in comments for identities generated with `age-plugin-yubikey 0.5.0` or
   earlier.
 
+## [0.3.4], [0.4.1], [0.5.1] - 2026-04-08
+### Fixed
+- `age-plugin-yubikey` now completely ignores any identity that has unrecognised
+  critical extensions in its certificate, to ensure it doesn't misuse a newer
+  identity type.
+
 ## [0.5.0] - 2024-08-04
 ### Fixed
 - `age-plugin-yubikey` can now be compiled with Rust 1.80 and above.

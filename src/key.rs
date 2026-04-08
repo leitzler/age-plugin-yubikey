@@ -11,6 +11,7 @@ use std::io;
 use std::iter;
 use std::thread::sleep;
 use std::time::{Duration, Instant, SystemTime};
+use x509_parser::der_parser::oid::Oid;
 use yubikey::{
     certificate::Certificate,
     piv::{decrypt_data, AlgorithmId, RetiredSlotId, SlotId},
@@ -23,12 +24,15 @@ use crate::{
     fl,
     native::p256tag,
     recipient::TAG_BYTES,
-    util::{otp_serial_prefix, Metadata},
+    util::{otp_serial_prefix, Metadata, POLICY_EXTENSION_OID},
     Recipient, IDENTITY_PREFIX,
 };
 
 const ONE_SECOND: Duration = Duration::from_secs(1);
 const FIFTEEN_SECONDS: Duration = Duration::from_secs(15);
+
+/// The set of OIDs that we understand and use when parsing YubiKey slot certificates.
+const KNOWN_OIDS: &[&[u64]] = &[POLICY_EXTENSION_OID];
 
 pub(crate) fn is_connected(reader: Reader) -> bool {
     filter_connected(&reader)
@@ -384,6 +388,30 @@ pub(crate) fn manage(yubikey: &mut YubiKey) -> Result<(), Error> {
     Ok(())
 }
 
+/// Parses the certificate to identify the preferred recipient type it corresponds to.
+pub(crate) fn identify_recipient(cert: &Certificate) -> Option<Recipient> {
+    let known_oids = KNOWN_OIDS
+        .iter()
+        .map(|oid| Oid::from(oid).unwrap())
+        .collect::<Vec<_>>();
+
+    // If the certificate contains any unrecognised critical extensions, reject it: we
+    // don't know how to correctly use the identity. In particular, some identities store
+    // parts of their private key material in certificate extensions to work around
+    // hardware limitations. Not understanding these extensions could lead to encrypting
+    // with the wrong protocol and violating security assumptions.
+    let (_, c) = x509_parser::parse_x509_certificate(cert.as_ref()).ok()?;
+    if c.tbs_certificate
+        .extensions()
+        .iter()
+        .any(|ext| ext.critical && !known_oids.contains(&ext.oid))
+    {
+        return None;
+    }
+
+    p256tag::Recipient::from_certificate(cert).map(Recipient::P256Tag)
+}
+
 /// Returns an iterator of keys that are occupying plugin-compatible slots, along with the
 /// corresponding recipient if the key is compatible with this plugin.
 pub(crate) fn list_slots(
@@ -393,9 +421,7 @@ pub(crate) fn list_slots(
         // We only use the retired slots.
         match key.slot() {
             SlotId::Retired(slot) => {
-                // Only P-256 keys are compatible with us.
-                let recipient =
-                    p256tag::Recipient::from_certificate(key.certificate()).map(Recipient::P256Tag);
+                let recipient = identify_recipient(key.certificate());
                 Some((key, slot, recipient))
             }
             _ => None,
@@ -594,9 +620,9 @@ impl Stub {
             .ok()
             .and_then(|cert| {
                 // Parse as the preferred recipient for each identity type.
-                p256tag::Recipient::from_certificate(&cert)
-                    .filter(|pk| pk.static_tag() == self.tag)
-                    .map(|pk| (cert, Recipient::P256Tag(pk)))
+                identify_recipient(&cert)
+                    .filter(|recipient| recipient.static_tag() == self.tag)
+                    .map(|r| (cert, r))
             }) {
             Some(pk) => pk,
             None => {
