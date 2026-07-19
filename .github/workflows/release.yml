@@ -44,6 +44,8 @@ jobs:
 
           - name: macos-x86_64
             os: macos-latest
+            target: x86_64-apple-darwin
+            build_flags: --target x86_64-apple-darwin
             archive_name: age-plugin-yubikey.tar.gz
             asset_suffix: x86_64-darwin.tar.gz
 
@@ -85,6 +87,13 @@ jobs:
         shell: bash
         if: matrix.name == 'windows'
 
+      - name: Upload Intel macOS artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: age-plugin-yubikey-macos-x86_64
+          path: release/age-plugin-yubikey.tar.gz
+          if-no-files-found: error
+    
       - name: Upload archive to release
         uses: svenstaro/upload-release-action@2.9.0
         with:
